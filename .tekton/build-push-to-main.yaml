@@ -1,0 +1,145 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: build-push-to-main
+  annotations:
+    pipelinesascode.tekton.dev/on-event: "[push]"
+    pipelinesascode.tekton.dev/on-target-branch: "[main]"
+    pipelinesascode.tekton.dev/max-keep-runs: "3"
+spec:
+  params:
+    - name: repo-url
+      value: "{{ repo_url }}"
+    - name: revision
+      value: "{{ revision }}"
+    - name: image-registry
+      value: "SET_BY_PAC_REPOSITORY_CR"
+    - name: image-name
+      value: "SET_BY_PAC_REPOSITORY_CR"
+    - name: tpa-url
+      value: "SET_BY_PAC_REPOSITORY_CR"
+    - name: issuer-url
+      value: "SET_BY_PAC_REPOSITORY_CR"
+  pipelineSpec:
+    params:
+      - name: repo-url
+      - name: revision
+      - name: image-registry
+      - name: image-name
+      - name: tpa-url
+      - name: issuer-url
+    tasks:
+      - name: fetch-source
+        taskRef:
+          resolver: cluster
+          params:
+            - { name: kind, value: task }
+            - { name: name, value: git-clone }
+            - { name: namespace, value: openshift-pipelines }
+        workspaces:
+          - { name: output, workspace: source }
+        params:
+          - { name: url, value: "$(params.repo-url)" }
+          - { name: revision, value: "$(params.revision)" }
+      - name: maven-build
+        runAfter: [fetch-source]
+        taskRef:
+          resolver: cluster
+          params:
+            - { name: kind, value: task }
+            - { name: name, value: maven }
+            - { name: namespace, value: openshift-pipelines }
+        workspaces:
+          - { name: source, workspace: source }
+          - { name: maven-settings, workspace: maven-settings }
+        params:
+          - { name: GOALS, value: ["package", "-DskipTests"] }
+      - name: build-image
+        runAfter: [maven-build]
+        taskRef:
+          resolver: cluster
+          params:
+            - { name: kind, value: task }
+            - { name: name, value: buildah }
+            - { name: namespace, value: openshift-pipelines }
+        workspaces:
+          - { name: source, workspace: source }
+          - { name: dockerconfig, workspace: docker-credentials }
+        params:
+          - name: IMAGE
+            value: "$(params.image-registry)/$(params.image-name):$(params.revision)"
+          - name: DOCKERFILE
+            value: Containerfile
+          - name: TLSVERIFY
+            value: "false"
+          - name: STORAGE_DRIVER
+            value: vfs
+          - name: BUILD_EXTRA_ARGS
+            value: >-
+              --label org.opencontainers.image.source=$(params.repo-url)
+              --label org.opencontainers.image.revision=$(params.revision)
+      - name: generate-upload-sbom
+        runAfter: [build-image]
+        taskSpec:
+          params:
+            - { name: IMAGE }
+            - { name: SOURCE_NAME }
+            - { name: SOURCE_VERSION }
+            - { name: TPA_URL }
+            - { name: ISSUER_URL }
+          steps:
+            - name: generate-sbom
+              image: registry.access.redhat.com/ubi9-minimal:latest
+              script: |
+                microdnf install -y tar gzip
+                curl -sSfL https://get.anchore.io/syft | sh -s -- -b /usr/local/bin
+                syft "registry:$(params.IMAGE)" \
+                  --source-name "$(params.SOURCE_NAME)" \
+                  --source-version "$(params.SOURCE_VERSION)" \
+                  --scope deep-squashed \
+                  --enrich java \
+                  -o "cyclonedx-json@1.6=/workspace/sbom/sbom.json"
+              volumeMounts:
+                - { name: sbom, mountPath: /workspace/sbom }
+            - name: upload-sbom
+              image: registry.access.redhat.com/ubi9-minimal:latest
+              script: |
+                TOKEN=$(curl -sk "$(params.ISSUER_URL)/protocol/openid-connect/token" \
+                  -d "grant_type=client_credentials" \
+                  -d "client_id=tpa-cli" \
+                  -d "client_secret=$(cat /etc/tpa-secret/client-secret)" \
+                  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+                curl -sk -X POST "$(params.TPA_URL)/api/v3/sbom" \
+                  -H "Authorization: Bearer ${TOKEN}" \
+                  -H "Content-Type: application/json" \
+                  --data-binary @/workspace/sbom/sbom.json
+                echo "SBOM uploaded to TPA"
+              volumeMounts:
+                - { name: sbom, mountPath: /workspace/sbom }
+                - { name: tpa-secret, mountPath: /etc/tpa-secret }
+          volumes:
+            - { name: sbom, emptyDir: {} }
+            - name: tpa-secret
+              secret:
+                secretName: oidc-cli
+        params:
+          - { name: IMAGE, value: "$(params.image-registry)/$(params.image-name):$(params.revision)" }
+          - { name: SOURCE_NAME, value: "{{ repo_name }}" }
+          - { name: SOURCE_VERSION, value: "$(params.revision)" }
+          - { name: TPA_URL, value: "$(params.tpa-url)" }
+          - { name: ISSUER_URL, value: "$(params.issuer-url)" }
+    workspaces:
+      - name: source
+      - name: maven-settings
+      - name: docker-credentials
+  workspaces:
+    - name: source
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources: { requests: { storage: 2Gi } }
+    - name: maven-settings
+      emptyDir: {}
+    - name: docker-credentials
+      secret:
+        secretName: nexus-push-credentials

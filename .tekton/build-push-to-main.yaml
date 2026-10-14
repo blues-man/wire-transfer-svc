@@ -38,6 +38,7 @@ spec:
             - { name: namespace, value: openshift-pipelines }
         workspaces:
           - { name: output, workspace: source }
+          - { name: basic-auth, workspace: git-credentials }
         params:
           - { name: URL, value: "$(params.repo-url)" }
           - { name: REVISION, value: "$(params.revision)" }
@@ -130,6 +131,7 @@ spec:
           - { name: ISSUER_URL, value: "$(params.issuer-url)" }
     workspaces:
       - name: source
+      - name: git-credentials
       - name: maven-settings
       - name: docker-credentials
   workspaces:
@@ -140,6 +142,9 @@ spec:
           resources: { requests: { storage: 2Gi } }
     - name: maven-settings
       emptyDir: {}
+    - name: git-credentials
+      secret:
+        secretName: "{{ git_auth_secret }}"
     - name: docker-credentials
       secret:
         secretName: nexus-push-credentials

@@ -85,41 +85,99 @@ spec:
             - { name: SOURCE_VERSION }
             - { name: TPA_URL }
             - { name: ISSUER_URL }
+          volumes:
+            - { name: sbom-output, emptyDir: {} }
           steps:
             - name: generate-sbom
-              image: registry.access.redhat.com/ubi9/ubi:latest
+              image: registry.access.redhat.com/ubi9-minimal:latest
+              volumeMounts:
+                - { name: sbom-output, mountPath: /tmp/sbom }
               script: |
-                microdnf install -y tar gzip
-                curl -sSfL https://get.anchore.io/syft | sh -s -- -b /usr/local/bin
+                #!/usr/bin/env bash
+                set -euo pipefail
+                echo "Installing prerequisites..."
+                microdnf install -y tar gzip --nodocs && microdnf clean all
+                echo "Installing syft..."
+                curl -sSfL https://get.anchore.io/syft | sh -s -- -b /tmp/bin
+                export PATH="/tmp/bin:${PATH}"
+                unset SSL_CERT_DIR
+                echo "Generating SBOM for $(params.IMAGE)..."
                 syft "registry:$(params.IMAGE)" \
                   --source-name "$(params.SOURCE_NAME)" \
                   --source-version "$(params.SOURCE_VERSION)" \
                   --scope deep-squashed \
                   --enrich java \
-                  -o "cyclonedx-json@1.6=/workspace/sbom/sbom.json"
+                  --select-catalogers "+java-archive-cataloger" \
+                  -o "cyclonedx-json@1.6=/tmp/sbom/sbom-cyclonedx.json"
+                echo "SBOM generated."
+            - name: verify-sbom
+              image: registry.access.redhat.com/ubi9:latest
               volumeMounts:
-                - { name: sbom, mountPath: /workspace/sbom }
-            - name: upload-sbom
-              image: registry.access.redhat.com/ubi9/ubi:latest
+                - { name: sbom-output, mountPath: /tmp/sbom }
               script: |
-                TOKEN=$(curl -sk "$(params.ISSUER_URL)/protocol/openid-connect/token" \
+                #!/usr/bin/env bash
+                SBOM_FILE="/tmp/sbom/sbom-cyclonedx.json"
+                if [ ! -f "${SBOM_FILE}" ]; then
+                  echo "ERROR: SBOM file not found" >&2
+                  exit 1
+                fi
+                python3 -c "
+                import json
+                with open('${SBOM_FILE}') as f:
+                    sbom = json.load(f)
+                meta = sbom.get('metadata', {})
+                component = meta.get('component', {})
+                components = sbom.get('components', [])
+                licenses_count = sum(1 for c in components if c.get('licenses'))
+                print('SBOM Summary:')
+                print(f'  CycloneDX version: {sbom.get(\"specVersion\", \"unknown\")}')
+                print(f'  Source: {component.get(\"name\", \"N/A\")} v{component.get(\"version\", \"N/A\")}')
+                print(f'  Components: {len(components)}')
+                print(f'  With license info: {licenses_count}')
+                "
+            - name: upload-sbom
+              image: registry.access.redhat.com/ubi9-minimal:latest
+              volumeMounts:
+                - { name: sbom-output, mountPath: /tmp/sbom }
+              env:
+                - name: CLIENT_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: oidc-cli
+                      key: client-secret
+              script: |
+                #!/usr/bin/env bash
+                set -euo pipefail
+                SBOM_FILE="/tmp/sbom/sbom-cyclonedx.json"
+                echo "Obtaining OIDC access token..."
+                TOKEN=$(curl -sk -X POST "$(params.ISSUER_URL)/protocol/openid-connect/token" \
+                  -H "Content-Type: application/x-www-form-urlencoded" \
                   -d "grant_type=client_credentials" \
                   -d "client_id=tpa-cli" \
-                  -d "client_secret=$(cat /etc/tpa-secret/client-secret)" \
-                  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
-                curl -sk -X POST "$(params.TPA_URL)/api/v3/sbom" \
+                  -d "client_secret=${CLIENT_SECRET}" \
+                  | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+                if [ -z "${TOKEN}" ]; then
+                  echo "ERROR: Failed to obtain access token" >&2
+                  exit 1
+                fi
+                echo "Access token obtained."
+                echo "Uploading SBOM to TPA..."
+                HTTP_CODE=$(curl -sk -X POST \
+                  "$(params.TPA_URL)/api/v3/sbom" \
                   -H "Authorization: Bearer ${TOKEN}" \
                   -H "Content-Type: application/json" \
-                  --data-binary @/workspace/sbom/sbom.json
-                echo "SBOM uploaded to TPA"
-              volumeMounts:
-                - { name: sbom, mountPath: /workspace/sbom }
-                - { name: tpa-secret, mountPath: /etc/tpa-secret }
-          volumes:
-            - { name: sbom, emptyDir: {} }
-            - name: tpa-secret
-              secret:
-                secretName: oidc-cli
+                  --data-binary "@${SBOM_FILE}" \
+                  -o /tmp/tpa-response.json \
+                  -w "%{http_code}")
+                echo "TPA response: HTTP ${HTTP_CODE}"
+                cat /tmp/tpa-response.json
+                echo ""
+                if [ "${HTTP_CODE}" -ge 200 ] && [ "${HTTP_CODE}" -lt 300 ]; then
+                  echo "SBOM uploaded successfully."
+                else
+                  echo "ERROR: SBOM upload failed with HTTP ${HTTP_CODE}" >&2
+                  exit 1
+                fi
         params:
           - { name: IMAGE, value: "$(params.image)" }
           - { name: SOURCE_NAME, value: "{{ repo_name }}" }

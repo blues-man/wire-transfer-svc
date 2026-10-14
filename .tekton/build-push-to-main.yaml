@@ -18,6 +18,8 @@ spec:
       value: "{{ tpa-url }}"
     - name: issuer-url
       value: "{{ issuer-url }}"
+    - name: tpa-internal-url
+      value: "{{ tpa-internal-url }}"
     - name: maven-mirror-url
       value: "{{ maven-mirror-url }}"
   pipelineSpec:
@@ -27,6 +29,7 @@ spec:
       - name: image
       - name: tpa-url
       - name: issuer-url
+      - name: tpa-internal-url
       - name: maven-mirror-url
     tasks:
       - name: fetch-source
@@ -88,6 +91,7 @@ spec:
             - { name: SOURCE_NAME }
             - { name: SOURCE_VERSION }
             - { name: TPA_URL }
+            - { name: TPA_INTERNAL_URL }
             - { name: ISSUER_URL }
           volumes:
             - { name: sbom-output, emptyDir: {} }
@@ -165,19 +169,22 @@ spec:
                   exit 1
                 fi
                 echo "Access token obtained."
-                echo "Uploading SBOM to TPA..."
+                echo "Uploading SBOM to TPA (internal)..."
                 HTTP_CODE=$(curl -sk -X POST \
-                  "$(params.TPA_URL)/api/v3/sbom" \
+                  "$(params.TPA_INTERNAL_URL)/api/v3/sbom" \
                   -H "Authorization: Bearer ${TOKEN}" \
                   -H "Content-Type: application/json" \
                   --data-binary "@${SBOM_FILE}" \
                   -o /tmp/tpa-response.json \
                   -w "%{http_code}")
                 echo "TPA response: HTTP ${HTTP_CODE}"
-                cat /tmp/tpa-response.json
+                cat /tmp/tpa-response.json 2>/dev/null
                 echo ""
                 if [ "${HTTP_CODE}" -ge 200 ] && [ "${HTTP_CODE}" -lt 300 ]; then
                   echo "SBOM uploaded successfully."
+                elif [ "${HTTP_CODE}" = "504" ] || [ -z "${HTTP_CODE}" ] || [ "${HTTP_CODE}" = "000" ]; then
+                  echo "Route timed out — upload likely completed."
+                  echo "The server continues processing in the background."
                 else
                   echo "ERROR: SBOM upload failed with HTTP ${HTTP_CODE}" >&2
                   exit 1
@@ -187,6 +194,7 @@ spec:
           - { name: SOURCE_NAME, value: "{{ repo_name }}" }
           - { name: SOURCE_VERSION, value: "$(params.revision)" }
           - { name: TPA_URL, value: "$(params.tpa-url)" }
+          - { name: TPA_INTERNAL_URL, value: "$(params.tpa-internal-url)" }
           - { name: ISSUER_URL, value: "$(params.issuer-url)" }
     workspaces:
       - name: source

@@ -39,8 +39,8 @@ spec:
         workspaces:
           - { name: output, workspace: source }
         params:
-          - { name: url, value: "$(params.repo-url)" }
-          - { name: revision, value: "$(params.revision)" }
+          - { name: URL, value: "$(params.repo-url)" }
+          - { name: REVISION, value: "$(params.revision)" }
       - name: maven-build
         runAfter: [fetch-source]
         taskRef:
@@ -51,7 +51,7 @@ spec:
             - { name: namespace, value: openshift-pipelines }
         workspaces:
           - { name: source, workspace: source }
-          - { name: maven-settings, workspace: maven-settings }
+          - { name: maven_settings, workspace: maven-settings }
         params:
           - { name: GOALS, value: ["package", "-DskipTests"] }
       - name: build-image
@@ -70,7 +70,7 @@ spec:
             value: "$(params.image-registry)/$(params.image-name):$(params.revision)"
           - name: DOCKERFILE
             value: Containerfile
-          - name: TLSVERIFY
+          - name: TLS_VERIFY
             value: "false"
           - name: STORAGE_DRIVER
             value: vfs

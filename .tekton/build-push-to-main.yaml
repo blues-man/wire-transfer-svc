@@ -87,7 +87,7 @@ spec:
             - { name: ISSUER_URL }
           steps:
             - name: generate-sbom
-              image: registry.access.redhat.com/ubi9-minimal:latest
+              image: registry.access.redhat.com/ubi9/ubi:latest
               script: |
                 microdnf install -y tar gzip
                 curl -sSfL https://get.anchore.io/syft | sh -s -- -b /usr/local/bin
@@ -100,7 +100,7 @@ spec:
               volumeMounts:
                 - { name: sbom, mountPath: /workspace/sbom }
             - name: upload-sbom
-              image: registry.access.redhat.com/ubi9-minimal:latest
+              image: registry.access.redhat.com/ubi9/ubi:latest
               script: |
                 TOKEN=$(curl -sk "$(params.ISSUER_URL)/protocol/openid-connect/token" \
                   -d "grant_type=client_credentials" \

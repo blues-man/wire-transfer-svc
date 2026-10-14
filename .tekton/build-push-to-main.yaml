@@ -18,6 +18,8 @@ spec:
       value: "{{ tpa-url }}"
     - name: issuer-url
       value: "{{ issuer-url }}"
+    - name: maven-mirror-url
+      value: "{{ maven-mirror-url }}"
   pipelineSpec:
     params:
       - name: repo-url
@@ -25,6 +27,7 @@ spec:
       - name: image
       - name: tpa-url
       - name: issuer-url
+      - name: maven-mirror-url
     tasks:
       - name: fetch-source
         taskRef:
@@ -52,6 +55,7 @@ spec:
           - { name: maven_settings, workspace: maven-settings }
         params:
           - { name: GOALS, value: ["package", "-DskipTests"] }
+          - { name: MAVEN_MIRROR_URL, value: "$(params.maven-mirror-url)" }
       - name: build-image
         runAfter: [maven-build]
         taskRef:

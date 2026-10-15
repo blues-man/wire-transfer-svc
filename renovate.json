@@ -2,20 +2,5 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "github>lightwell-experience/renovate-config:java-remediated"
-  ],
-  "hostRules": [
-    {
-      "matchHost": "nexus.example.com",
-      "hostType": "maven",
-      "username": "your-nexus-username",
-      "password": "your-nexus-token"
-    }
-  ],
-  "packageRules": [
-    {
-      "matchManagers": ["custom.regex"],
-      "matchDatasources": ["maven"],
-      "registryUrls": ["https://nexus.example.com/repository/lightwell-java-remediated"]
-    }
   ]
 }

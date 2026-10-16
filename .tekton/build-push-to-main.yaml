@@ -48,8 +48,22 @@ spec:
         params:
           - { name: URL, value: "$(params.repo-url)" }
           - { name: REVISION, value: "$(params.revision)" }
-      - name: maven-build
+      - name: run-tests
         runAfter: [fetch-source]
+        taskRef:
+          resolver: cluster
+          params:
+            - { name: kind, value: task }
+            - { name: name, value: maven }
+            - { name: namespace, value: openshift-pipelines }
+        workspaces:
+          - { name: source, workspace: source }
+          - { name: maven_settings, workspace: maven-settings }
+        params:
+          - { name: GOALS, value: ["verify"] }
+          - { name: MAVEN_MIRROR_URL, value: "$(params.maven-mirror-url)" }
+      - name: maven-build
+        runAfter: [run-tests]
         taskRef:
           resolver: cluster
           params:

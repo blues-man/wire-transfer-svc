@@ -22,6 +22,8 @@ spec:
       value: "{{ tpa-internal-url }}"
     - name: maven-mirror-url
       value: "{{ maven-mirror-url }}"
+    - name: commit-title
+      value: "{{ title }}"
   pipelineSpec:
     params:
       - name: repo-url
@@ -29,6 +31,7 @@ spec:
       - name: image
       - name: tpa-url
       - name: issuer-url
+      - name: commit-title
       - name: tpa-internal-url
       - name: maven-mirror-url
     tasks:
@@ -192,7 +195,7 @@ spec:
         params:
           - { name: IMAGE, value: "$(params.image)" }
           - { name: SOURCE_NAME, value: "{{ repo_name }}" }
-          - { name: SOURCE_VERSION, value: "$(params.revision)" }
+          - { name: SOURCE_VERSION, value: "$(params.commit-title)" }
           - { name: TPA_URL, value: "$(params.tpa-url)" }
           - { name: TPA_INTERNAL_URL, value: "$(params.tpa-internal-url)" }
           - { name: ISSUER_URL, value: "$(params.issuer-url)" }

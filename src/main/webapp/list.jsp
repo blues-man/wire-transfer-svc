@@ -10,7 +10,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bank Account System - Account List</title>
+    <title>Acme Inc. Bank - Account List</title>
     <style>
         * {
             margin: 0;
@@ -214,8 +214,8 @@
 </head>
 <body>
     <div class="header">
-        <h1>LEGACY BANK</h1>
-        <div class="subtitle">Struts 1.x Account Management System</div>
+        <h1>ACME INC. BANK</h1>
+        <div class="subtitle">Wire Transfer Service</div>
     </div>
     
     <div class="container">
@@ -321,7 +321,7 @@
     </div>
     
     <div class="footer">
-        Legacy Bank &copy; 2024 - Struts 1.x Demo Application
+        Acme Inc. Bank &copy; 2024 - Internal Banking System
     </div>
 </body>
 </html>

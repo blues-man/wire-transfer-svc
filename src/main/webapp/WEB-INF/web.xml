@@ -5,7 +5,7 @@
                              http://xmlns.jcp.org/xml/ns/javaee/web-app_3_1.xsd"
          version="3.1">
 
-    <display-name>Struts Bank Demo Application</display-name>
+    <display-name>Acme Inc. Wire Transfer Service</display-name>
     <description>
         A legacy Struts 1.x bank account management demo application.
         Used for demonstrating modernization and migration scenarios.

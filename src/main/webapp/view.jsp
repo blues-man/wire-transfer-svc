@@ -9,7 +9,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bank Account System - Account Details</title>
+    <title>Acme Inc. Bank - Account Details</title>
     <style>
         * {
             margin: 0;
@@ -218,7 +218,7 @@
 </head>
 <body>
     <div class="header">
-        <h1>LEGACY BANK</h1>
+        <h1>ACME INC. BANK</h1>
         <html:link action="/listAccounts" styleClass="btn btn-secondary">
             ← Back to List
         </html:link>

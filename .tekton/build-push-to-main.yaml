@@ -23,7 +23,7 @@ spec:
     - name: maven-mirror-url
       value: "{{ maven-mirror-url }}"
     - name: commit-title
-      value: "{{ title }}"
+      value: "{{ body.commits.0.title }}"
   pipelineSpec:
     params:
       - name: repo-url

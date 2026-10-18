@@ -168,6 +168,21 @@ spec:
                     with urllib.request.urlopen(url, context=ctx, timeout=60) as f:
                         return f.read() if binary else f.read().decode("utf-8", "replace")
 
+                def norm_lic(names):
+                    """Compare licences by meaning, not by phrasing.
+
+                    h2 1.4.200 declares one licence called "MPL 2.0 or EPL 1.0";
+                    2.2.224 splits the same thing in two. Reporting that as a
+                    licence change would be a false alarm.
+                    """
+                    out = set()
+                    for n in names or []:
+                        for part in re.split(r"\s+or\s+|\s*/\s*|\s*,\s*", n, flags=re.I):
+                            part = part.strip().rstrip(".")
+                            if part:
+                                out.add(part.upper())
+                    return out
+
                 def licences(pom):
                     try:
                         root = ET.fromstring(pom)
@@ -256,7 +271,7 @@ spec:
                             if not ln:
                                 results["license"] = {"status": "warning",
                                     "details": f"the remediated POM declares no licence (was {', '.join(lo)})"}
-                            elif sorted(lo) == sorted(ln):
+                            elif norm_lic(lo) == norm_lic(ln):
                                 results["license"] = {"status": "passed",
                                     "details": f"{', '.join(ln)} (unchanged)"}
                             else:

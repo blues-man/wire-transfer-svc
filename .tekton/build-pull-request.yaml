@@ -61,7 +61,10 @@ spec:
           - { name: source, workspace: source }
           - { name: maven_settings, workspace: maven-settings }
         params:
-          - { name: GOALS, value: ["verify", "--fail-never"] }
+          # makeAggregateBom writes target/bom.json, which report-validation
+          # checks actually lists the remediated coordinate. Running it in the
+          # same invocation reuses the resolved dependency tree.
+          - { name: GOALS, value: ["verify", "org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom", "--fail-never"] }
           - { name: MAVEN_MIRROR_URL, value: "$(params.maven-mirror-url)" }
 
       # Fills the Automated Validation table on the merge request opened by the
@@ -76,6 +79,7 @@ spec:
             - { name: MR_IID }
             - { name: GITLAB_API_URL }
             - { name: PROJECT_PATH }
+            - { name: MAVEN_MIRROR_URL }
           workspaces:
             - name: source
           steps:
@@ -93,7 +97,7 @@ spec:
               script: |
                 #!/usr/bin/env python3
                 """Parse surefire/failsafe reports and update the MR table."""
-                import glob, json, os, ssl, sys, urllib.parse, urllib.request
+                import glob, hashlib, json, os, re, ssl, sys, urllib.parse, urllib.request
                 import xml.etree.ElementTree as ET
 
                 iid = "$(params.MR_IID)"
@@ -152,14 +156,42 @@ spec:
                     r = row(res, label)
                     if r:
                         results[key] = r
-                # The build itself is the compatibility signal: Maven resolved
-                # the bumped dependency and compiled every call site against it.
-                if unit is not None or integ is not None:
-                    results["dependency_compat"] = {
-                        "status": "passed",
-                        "details": "Project compiles and resolves against the remediated version",
-                    }
-                print("results:", json.dumps(results, indent=2))
+
+                # ---- checks that need the remediated coordinate ------------
+                # Read it back out of the MR body's handoff block rather than
+                # re-deriving it: that is what the agent actually bumped.
+                mirror = "$(params.MAVEN_MIRROR_URL)".rstrip("/")
+                nexus = mirror.split("/repository/")[0].rstrip("/")
+                LW_REPO = "lightwell-remediated"
+
+                def fetch(url, binary=False):
+                    with urllib.request.urlopen(url, context=ctx, timeout=60) as f:
+                        return f.read() if binary else f.read().decode("utf-8", "replace")
+
+                def licences(pom):
+                    try:
+                        root = ET.fromstring(pom)
+                    except ET.ParseError:
+                        return None
+                    ns = {"m": "http://maven.apache.org/POM/4.0.0"}
+                    names = [e.text.strip() for e in root.findall(".//m:licenses/m:license/m:name", ns) if e.text]
+                    if not names:
+                        names = [e.text.strip() for e in root.findall(".//licenses/license/name") if e.text]
+                    return names
+
+                def coords(desc):
+                    m = re.search(r"```json\n(.*?)\n```", desc, re.S)
+                    if not m:
+                        return None
+                    try:
+                        h = json.loads(m.group(1))
+                    except Exception:
+                        return None
+                    art = h.get("artifact_id") or ""
+                    if ":" not in art:
+                        return None
+                    g, a = art.split(":", 1)
+                    return g, a, h.get("new_version"), h.get("old_version")
 
                 mr = call("GET", f"/projects/{proj}/merge_requests/{iid}")
                 # AO merges auto_approve apps as soon as its in-loop Verifier
@@ -175,6 +207,108 @@ spec:
                 if VS not in desc:
                     print("MR has no Lightwell validation block; nothing to update.")
                     sys.exit(0)
+
+                gav = coords(desc)
+                if gav:
+                    group, artifact, new_v, old_v = gav
+                    jar_rel = f"{group.replace('.','/')}/{artifact}/{new_v}/{artifact}-{new_v}.jar"
+
+                    # Integrity, not signature. The tenant mirror publishes
+                    # jar/pom/metadata with no detached GPG signature, so there
+                    # is nothing to verify cryptographically -- say so rather
+                    # than implying one was checked. The checksum comes from the
+                    # REST assets API: Nexus does not write .sha1 siblings for
+                    # artifacts uploaded by raw PUT.
+                    try:
+                        q = (f"{nexus}/service/rest/v1/search/assets?repository={LW_REPO}"
+                             f"&maven.groupId={group}&maven.artifactId={artifact}&maven.extension=jar")
+                        items = json.loads(fetch(q)).get("items", [])
+                        asset = next((i for i in items
+                                      if i.get("path", "").endswith(jar_rel)), None)
+                        if asset is None:
+                            results["signature"] = {"status": "failed",
+                                "details": f"Nexus holds no {artifact} {new_v} in {LW_REPO}"}
+                        else:
+                            rec = asset.get("checksum") or {}
+                            blob = fetch(f"{nexus}/repository/{LW_REPO}/{jar_rel}", binary=True)
+                            got256 = hashlib.sha256(blob).hexdigest()
+                            got1 = hashlib.sha1(blob).hexdigest()
+                            if rec.get("sha256") and rec["sha256"] != got256:
+                                results["signature"] = {"status": "failed",
+                                    "details": f"SHA-256 mismatch against Nexus ({rec['sha256'][:16]}... vs {got256[:16]}...)"}
+                            elif rec.get("sha1") and rec["sha1"] != got1:
+                                results["signature"] = {"status": "failed",
+                                    "details": f"SHA-1 mismatch against Nexus ({rec['sha1'][:16]}... vs {got1[:16]}...)"}
+                            elif rec:
+                                results["signature"] = {"status": "passed",
+                                    "details": f"Artifact integrity verified against Nexus (SHA-256 {got256[:16]}...)"}
+                    except Exception as exc:
+                        results["signature"] = {"status": "failed",
+                            "details": f"could not verify the artifact against Nexus: {exc}"}
+
+                    # Licence: compare what the base version declares with what
+                    # the remediated build declares. A rebuild must not change it.
+                    try:
+                        old_pom = fetch(f"{mirror}/{group.replace('.','/')}/{artifact}/{old_v}/{artifact}-{old_v}.pom")
+                        new_pom = fetch(f"{nexus}/repository/{LW_REPO}/{group.replace('.','/')}/{artifact}/{new_v}/{artifact}-{new_v}.pom")
+                        lo, ln = licences(old_pom), licences(new_pom)
+                        if lo is not None and ln is not None and (lo or ln):
+                            if not ln:
+                                results["license"] = {"status": "warning",
+                                    "details": f"the remediated POM declares no licence (was {', '.join(lo)})"}
+                            elif sorted(lo) == sorted(ln):
+                                results["license"] = {"status": "passed",
+                                    "details": f"{', '.join(ln)} (unchanged)"}
+                            else:
+                                results["license"] = {"status": "warning",
+                                    "details": f"licence changed: {', '.join(lo) or 'none'} -> {', '.join(ln)}"}
+                    except Exception as exc:
+                        results["license"] = {"status": "failed",
+                            "details": f"could not compare licences: {exc}"}
+
+                    # SBOM: the remediated coordinate must actually appear in
+                    # the generated bill of materials at the bumped version.
+                    sbom_path = next((p for p in (
+                        os.path.join(os.getcwd(), "target", "bom.json"),
+                        os.path.join(os.getcwd(), "target", "sbom-cyclonedx.json"))
+                        if os.path.exists(p)), None)
+                    if sbom_path:
+                        try:
+                            doc = json.load(open(sbom_path))
+                            comps = doc.get("components") or []
+                            hit = [c for c in comps if c.get("name") == artifact]
+                            if any(c.get("version") == new_v for c in hit):
+                                results["sbom_integrity"] = {"status": "passed",
+                                    "details": f"CycloneDX {doc.get('specVersion','?')} lists {artifact} {new_v} ({len(comps)} components)"}
+                            elif hit:
+                                results["sbom_integrity"] = {"status": "failed",
+                                    "details": f"SBOM lists {artifact} {', '.join(sorted({c.get('version','?') for c in hit}))}, expected {new_v}"}
+                            else:
+                                results["sbom_integrity"] = {"status": "failed",
+                                    "details": f"SBOM does not list {artifact} ({len(comps)} components)"}
+                        except Exception as exc:
+                            results["sbom_integrity"] = {"status": "failed",
+                                "details": f"SBOM is unreadable: {exc}"}
+
+                    # The build resolved and compiled against the bumped
+                    # coordinate -- stronger than "mvn exited 0".
+                    if (unit is not None or integ is not None):
+                        try:
+                            pom_txt = open("pom.xml").read()
+                            if re.search(r"<artifactId>\s*%s\s*</artifactId>\s*<version>\s*%s\s*</version>"
+                                         % (re.escape(artifact), re.escape(new_v)), pom_txt, re.S):
+                                results["dependency_compat"] = {"status": "passed",
+                                    "details": f"Compiles and resolves against {group}:{artifact}:{new_v}"}
+                            else:
+                                results["dependency_compat"] = {"status": "failed",
+                                    "details": f"pom.xml does not declare {artifact} {new_v} after the bump"}
+                        except OSError:
+                            pass
+                else:
+                    print("No handoff coordinates in the MR body; "
+                          "artifact-level checks stay Pending.")
+
+                print("results:", json.dumps(results, indent=2))
 
                 CHECKS = [("risk_class", "Acme Inc. Risk Class"),
                           ("signature", "Binary signature verification"),
@@ -235,6 +369,7 @@ spec:
           - { name: MR_IID, value: "$(params.mr-iid)" }
           - { name: GITLAB_API_URL, value: "$(params.gitlab-api-url)" }
           - { name: PROJECT_PATH, value: "$(params.project-path)" }
+          - { name: MAVEN_MIRROR_URL, value: "$(params.maven-mirror-url)" }
     workspaces:
       - name: source
       - name: git-credentials

@@ -213,6 +213,86 @@ spec:
           - { name: TPA_URL, value: "$(params.tpa-url)" }
           - { name: TPA_INTERNAL_URL, value: "$(params.tpa-internal-url)" }
           - { name: ISSUER_URL, value: "$(params.issuer-url)" }
+
+      # Closes the GitOps loop. Without this the image is built, signed and
+      # pushed, but acme-deployment keeps the tag seeded at provisioning time,
+      # so ArgoCD goes on serving the old build and the lab's "ArgoCD deploys
+      # the new image" step never actually happens.
+      #
+      # Uses the GitLab Commits API rather than git push: main is protected,
+      # and the API with the root PAT avoids the unprotect/re-protect race
+      # between two apps building at the same time.
+      - name: promote-to-deployment-repo
+        runAfter: [generate-upload-sbom]
+        taskSpec:
+          params:
+            - { name: APP_NAME }
+            - { name: IMAGE_TAG }
+            - { name: REPO_URL }
+            - { name: GROUP }
+          steps:
+            - name: bump-image-tag
+              image: registry.access.redhat.com/ubi9/python-39:latest
+              env:
+                - name: GITLAB_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: gitlab-pac-token
+                      key: token
+              script: |
+                #!/usr/bin/env python3
+                import json, os, re, ssl, sys, urllib.parse, urllib.request
+
+                app = "$(params.APP_NAME)"
+                tag = "$(params.IMAGE_TAG)"
+                api = "/".join("$(params.REPO_URL)".split("/")[0:3]) + "/api/v4"
+                proj = urllib.parse.quote("$(params.GROUP)/acme-deployment", safe="")
+                tok = os.environ.get("GITLAB_TOKEN", "")
+                if not tok:
+                    sys.exit("ERROR: gitlab-pac-token is empty; cannot promote")
+
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+
+                def call(method, path, body=None, raw=False):
+                    r = urllib.request.Request(
+                        api + path, method=method,
+                        data=json.dumps(body).encode() if body else None)
+                    r.add_header("PRIVATE-TOKEN", tok)
+                    r.add_header("Content-Type", "application/json")
+                    with urllib.request.urlopen(r, context=ctx) as f:
+                        t = f.read().decode()
+                        return t if raw else json.loads(t or "{}")
+
+                path = urllib.parse.quote("values.yaml", safe="")
+                vals = call("GET", f"/projects/{proj}/repository/files/{path}/raw?ref=main",
+                            raw=True)
+
+                # Rewrite imageTag only inside this app's block, so two apps
+                # promoting at once cannot clobber each other's tag.
+                pat = re.compile(
+                    r"(?m)^(  %s:\n(?:    .*\n)*?    imageTag:\s*)\S+" % re.escape(app))
+                if not pat.search(vals):
+                    sys.exit(f"ERROR: no imageTag entry for {app} in values.yaml")
+                new = pat.sub(lambda m: m.group(1) + f'"{tag}"', vals, count=1)
+                if new == vals:
+                    print(f"{app} already at {tag}; nothing to promote.")
+                    sys.exit(0)
+
+                call("POST", f"/projects/{proj}/repository/commits", {
+                    "branch": "main",
+                    "commit_message": f"promote {app} to {tag}",
+                    "actions": [{"action": "update",
+                                 "file_path": "values.yaml",
+                                 "content": new}],
+                })
+                print(f"Promoted {app} -> {tag}; ArgoCD will sync acme-deployment.")
+        params:
+          - { name: APP_NAME, value: "{{ repo_name }}" }
+          - { name: IMAGE_TAG, value: "$(params.revision)" }
+          - { name: REPO_URL, value: "$(params.repo-url)" }
+          - { name: GROUP, value: "{{ repo_owner }}" }
     workspaces:
       - name: source
       - name: git-credentials
